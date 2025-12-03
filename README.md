@@ -41,13 +41,13 @@ Place the downloaded .trt file into `src/bevformer_pkg/models`
 Start the ROS nodes:
 ```bash
 source devel/setup.bash
-roslaunch traffic_pkg traffic_node.launch
+roslaunch bevformer_pkg run_bevformer.launch
 # In another terminal:
 source devel/setup.bash
-roslaunch bevformer_pkg run_bevformer.launch
+roslaunch traffic_pkg traffic_node.launch
 ```
 
-Note: Running the launch files in the wrong order may fail because the traffic light detection node publishes undistorted image topics that the BEVformer node subscribes to.
+Note: Running the launch files in the wrong order may fail because the run_bevformer launch file contains the node publishes undistorted image topics that the traffic light detection node subscribes to.
 
 ## Model checkpoints
 - Checkpoints for each inference node are stored in `src/{package_name}/models`.
