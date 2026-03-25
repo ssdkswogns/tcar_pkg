@@ -566,6 +566,7 @@ class TrafficLightRosNode:
 
         self.frame_index += 1
 
+        # conf & w:h ratio filter, tracker
         raw_detections = run_inference_on_image(
             image_bgr=img_bgr,
             yolo_model=self.yolo,
@@ -581,6 +582,7 @@ class TrafficLightRosNode:
             tracked_threshold_relaxation=self.tracked_threshold_relaxation,
             crop_pad=self.crop_pad,
         )
+        # tracking filter, color change handling
         self.active_tracks, detections = update_tracks(
             detections=raw_detections,
             previous_tracks=self.active_tracks,
