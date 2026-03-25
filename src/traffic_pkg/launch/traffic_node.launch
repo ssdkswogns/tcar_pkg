@@ -9,10 +9,19 @@
   <arg name="pub_image"          default="/traffic/image_bbox/compressed" />
 
   <!-- 모델/파라미터 (models/ 아래 파일명만 지정하세요) -->
-  <arg name="yolo_weights"       default="best.pt" />
+  <arg name="yolo_weights"       default="last.pt" />
   <arg name="classifier_ckpt"    default="mobilenet.ckpt" />
   <arg name="traffic_class_id"   default="1" />      <!-- YOLO에서 신호등 class id -->
-  <arg name="det_conf_thres"     default="0.25" />
+  <arg name="det_conf_thres"     default="0.6" />
+  <arg name="cls_conf_thres"     default="0.9" />
+  <arg name="min_box_aspect_ratio" default="2.0" />
+  <arg name="track_iou_thres"    default="0.1" />
+  <arg name="min_track_frames"   default="3" />
+  <arg name="track_persist_after_frames" default="10" />
+  <arg name="track_max_missed_frames" default="5" />
+  <arg name="tracked_threshold_relaxation" default="0.2" />
+  <arg name="color_change_frames" default="4" />
+  <arg name="device"             default="auto" />
   <arg name="crop_pad"           default="2" />
 
   <group ns="$(arg ns)">
@@ -32,6 +41,15 @@
       <param name="classifier_ckpt"      value="$(arg classifier_ckpt)"/>
       <param name="traffic_class_id"     value="$(arg traffic_class_id)"/>
       <param name="det_conf_thres"       value="$(arg det_conf_thres)"/>
+      <param name="cls_conf_thres"       value="$(arg cls_conf_thres)"/>
+      <param name="min_box_aspect_ratio" value="$(arg min_box_aspect_ratio)"/>
+      <param name="track_iou_thres"      value="$(arg track_iou_thres)"/>
+      <param name="min_track_frames"     value="$(arg min_track_frames)"/>
+      <param name="track_persist_after_frames" value="$(arg track_persist_after_frames)"/>
+      <param name="track_max_missed_frames" value="$(arg track_max_missed_frames)"/>
+      <param name="tracked_threshold_relaxation" value="$(arg tracked_threshold_relaxation)"/>
+      <param name="color_change_frames"  value="$(arg color_change_frames)"/>
+      <param name="device"               value="$(arg device)"/>
       <param name="crop_pad"             value="$(arg crop_pad)"/>
       <param name="pub_detections_topic" value="$(arg pub_detections)"/>
       <param name="pub_image_topic"      value="$(arg pub_image)"/>
