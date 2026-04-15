@@ -33,7 +33,6 @@ TRACK_MAX_MISSED = 5
 STATE_CONFIRM_FRAMES = 3
 STATE_CONFIRM_CONF = 0.9
 IMAGE_MSG_FIELDS = 8
-REACQUIRE_FRAMES = 2
 
 
 @dataclass
@@ -61,9 +60,6 @@ class TrackState:
     candidate_state_name: str | None = None
     candidate_state_hits: int = 0
     bbox_history: list[tuple[int, int, int, int]] = field(default_factory=list)
-    reacquiring: bool = False
-    reacquire_candidate_state_name: str | None = None
-    reacquire_hits: int = 0
 
 
 def resolve_torch_device(device_arg: str) -> torch.device:
@@ -235,19 +231,15 @@ def predict_bbox_from_history(track: TrackState) -> tuple[int, int, int, int]:
     centers = [bbox_center_wh(bbox) for bbox in history]
     delta_cx = []
     delta_cy = []
-    delta_w = []
-    delta_h = []
     for previous, current in zip(centers[:-1], centers[1:]):
         delta_cx.append(current[0] - previous[0])
         delta_cy.append(current[1] - previous[1])
-        delta_w.append(current[2] - previous[2])
-        delta_h.append(current[3] - previous[3])
 
     last_cx, last_cy, last_w, last_h = centers[-1]
     next_cx = last_cx + (sum(delta_cx) / len(delta_cx))
     next_cy = last_cy + (sum(delta_cy) / len(delta_cy))
-    next_w = max(1.0, last_w + (sum(delta_w) / len(delta_w)))
-    next_h = max(1.0, last_h + (sum(delta_h) / len(delta_h)))
+    next_w = last_w
+    next_h = last_h
     return rect_from_center_wh(next_cx, next_cy, next_w, next_h)
 
 
@@ -286,8 +278,8 @@ def update_tracks(
     track_max_missed: int,
 ) -> list[TrackState]:
     matches = match_tracks_to_detections(active_tracks, detections, track_min_iou)
-    matched_track_indices = {track_index for track_index, _ in matches}
-    matched_detection_indices = {detection_index for _, detection_index in matches}
+    matched_track_indices: set[int] = set()
+    matched_detection_indices: set[int] = set()
     next_tracks: list[TrackState] = []
 
     for track_index, detection_index in matches:
@@ -297,44 +289,17 @@ def update_tracks(
 
         if previous_track.confirmed:
             if should_keep_confirmed_track(detection):
-                stable_state_name = previous_track.state_name
-                stable_cls_conf = previous_track.cls_conf
-                candidate_state_name = previous_track.candidate_state_name
-                candidate_state_hits = previous_track.candidate_state_hits
-                reacquiring = previous_track.reacquiring
-                reacquire_candidate_state_name = previous_track.reacquire_candidate_state_name
-                reacquire_hits = previous_track.reacquire_hits
+                if previous_track.misses > 0 and detection.state_name != previous_track.state_name:
+                    continue
 
-                if previous_track.misses > 0 or previous_track.reacquiring:
-                    observed_state = detection.state_name
-                    if is_trackable_state(observed_state):
-                        if previous_track.reacquiring and previous_track.reacquire_candidate_state_name == observed_state:
-                            reacquire_hits = previous_track.reacquire_hits + 1
-                        else:
-                            reacquire_hits = 1
-                        reacquiring = True
-                        reacquire_candidate_state_name = observed_state
-                        if reacquire_hits >= REACQUIRE_FRAMES:
-                            stable_state_name = observed_state
-                            stable_cls_conf = detection.cls_conf
-                            candidate_state_name = None
-                            candidate_state_hits = 0
-                            reacquiring = False
-                            reacquire_candidate_state_name = None
-                            reacquire_hits = 0
-                    else:
-                        reacquiring = True
-                        reacquire_candidate_state_name = None
-                        reacquire_hits = 0
-                else:
-                    stable_state_name, candidate_state_name, candidate_state_hits, stable_cls_conf = update_track_state_label(
-                        previous_track,
-                        observed_state=detection.state_name,
-                        cls_conf=detection.cls_conf,
-                    )
-                    reacquiring = False
-                    reacquire_candidate_state_name = None
-                    reacquire_hits = 0
+                matched_track_indices.add(track_index)
+                matched_detection_indices.add(detection_index)
+
+                stable_state_name, candidate_state_name, candidate_state_hits, stable_cls_conf = update_track_state_label(
+                    previous_track,
+                    observed_state=detection.state_name,
+                    cls_conf=detection.cls_conf,
+                )
 
                 next_tracks.append(
                     TrackState(
@@ -352,12 +317,11 @@ def update_tracks(
                         candidate_state_name=candidate_state_name,
                         candidate_state_hits=candidate_state_hits,
                         bbox_history=append_bbox_history(previous_track.bbox_history, matched_bbox),
-                        reacquiring=reacquiring,
-                        reacquire_candidate_state_name=reacquire_candidate_state_name,
-                        reacquire_hits=reacquire_hits,
                     )
                 )
             else:
+                matched_track_indices.add(track_index)
+                matched_detection_indices.add(detection_index)
                 next_misses = previous_track.misses + 1
                 if next_misses > track_max_missed:
                     continue
@@ -378,13 +342,12 @@ def update_tracks(
                         candidate_state_name=previous_track.candidate_state_name,
                         candidate_state_hits=previous_track.candidate_state_hits,
                         bbox_history=append_bbox_history(previous_track.bbox_history, predicted_bbox),
-                        reacquiring=previous_track.reacquiring,
-                        reacquire_candidate_state_name=previous_track.reacquire_candidate_state_name,
-                        reacquire_hits=previous_track.reacquire_hits,
                     )
                 )
             continue
 
+        matched_track_indices.add(track_index)
+        matched_detection_indices.add(detection_index)
         strong_hits = previous_track.consecutive_strong_hits + 1 if is_strong_detection(detection) else 0
         confirmed = strong_hits >= TRACK_CONFIRM_FRAMES
         stable_state_name = previous_track.state_name
@@ -414,9 +377,6 @@ def update_tracks(
                 candidate_state_name=candidate_state_name,
                 candidate_state_hits=candidate_state_hits,
                 bbox_history=append_bbox_history(previous_track.bbox_history, matched_bbox),
-                reacquiring=False,
-                reacquire_candidate_state_name=None,
-                reacquire_hits=0,
             )
         )
 
@@ -443,9 +403,6 @@ def update_tracks(
                 candidate_state_name=track.candidate_state_name,
                 candidate_state_hits=track.candidate_state_hits,
                 bbox_history=append_bbox_history(track.bbox_history, predicted_bbox),
-                reacquiring=track.reacquiring,
-                reacquire_candidate_state_name=track.reacquire_candidate_state_name,
-                reacquire_hits=track.reacquire_hits,
             )
         )
 
@@ -466,7 +423,7 @@ def confirmed_track_detections(tracks: list[TrackState], min_hits: int) -> list[
     return [
         track
         for track in tracks
-        if track.confirmed and not track.reacquiring and is_trackable_state(track.state_name) and track.hits >= min_hits
+        if track.confirmed and is_trackable_state(track.state_name) and track.hits >= min_hits
     ]
 
 
