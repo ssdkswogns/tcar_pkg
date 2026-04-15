@@ -33,10 +33,23 @@ def parse_frame_index(image_path: Path) -> int:
 
 
 def collect_image_folders(input_root: Path, source_dir_name: str) -> list[Path]:
+    if collect_images(input_root):
+        return [input_root]
+
+    if input_root.name == source_dir_name and collect_images(input_root):
+        return [input_root]
+
     folders = sorted(input_root.glob(f"traffic_260323_*/{source_dir_name}"))
     if not folders:
         folders = sorted(p for p in input_root.rglob(source_dir_name) if p.is_dir())
-    return folders
+    return [folder for folder in folders if collect_images(folder)]
+
+
+def resolve_input_root(input_root: Path) -> Path:
+    input_root = Path(input_root)
+    if (input_root / "vis").is_dir():
+        return input_root / "vis"
+    return input_root
 
 
 def collect_images(folder: Path) -> list[Path]:
@@ -129,8 +142,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--input-root",
         type=Path,
-        default=Path("/home/shchon11/traffic_260323/extracted_images_inference_vis5"),
-        help="Root directory containing saved inference images.",
+        default=Path(__file__).resolve().parent / "infer",
+        help="Inference output root or vis root containing saved images.",
     )
     parser.add_argument(
         "--source-dir-name",
@@ -178,6 +191,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    args.input_root = resolve_input_root(args.input_root)
 
     if not args.input_root.exists():
         raise FileNotFoundError(f"Input root does not exist: {args.input_root}")

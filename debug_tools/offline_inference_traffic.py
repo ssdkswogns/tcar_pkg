@@ -30,6 +30,18 @@ PREP = transforms.Compose(
 )
 
 
+def default_model_dir() -> Path:
+    package_dir = Path(__file__).resolve().parents[1]
+    candidates = [
+        package_dir / "src" / "traffic_pkg" / "models",
+        package_dir / "models",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0]
+
+
 @dataclass
 class Detection:
     cls_id: int
@@ -39,6 +51,14 @@ class Detection:
     bbox: tuple[int, int, int, int]
     track_length: int = 1
     missed_frames: int = 0
+
+
+@dataclass
+class DebugCandidate:
+    bbox: tuple[int, int, int, int]
+    stage: str
+    text: str
+    color: tuple[int, int, int]
 
 
 @dataclass
@@ -54,6 +74,20 @@ class TrackState:
     candidate_cls_id: int | None = None
     candidate_cls_name: str | None = None
     candidate_count: int = 0
+
+
+@dataclass(frozen=True)
+class EmissiveGateConfig:
+    min_value: int = 100
+    min_saturation: int = 20
+    min_component_area: int = 3
+    max_component_aspect: float = 4.0
+    min_center_score: float = 0.1
+    min_score: float = 0.3
+    min_component_pixels: int = 2
+
+
+EMISSIVE_GATE_CONFIG = EmissiveGateConfig()
 
 
 class NIA_SEGNet_module(nn.Module):
@@ -258,6 +292,111 @@ def should_relax_thresholds_for_bbox(
     return False
 
 
+def is_valid_emissive_traffic_light(
+    crop_bgr: np.ndarray,
+    config: EmissiveGateConfig = EMISSIVE_GATE_CONFIG,
+) -> tuple[bool, dict]:
+    if crop_bgr.size == 0:
+        return False, {"reason": "empty_crop"}
+
+    hsv = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2HSV)
+    gray = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2GRAY)
+    height, width = gray.shape
+    area = height * width
+
+    _, saturation, value = cv2.split(hsv)
+    mask = ((value >= config.min_value) & (saturation >= config.min_saturation)).astype(
+        np.uint8
+    ) * 255
+
+    kernel = np.ones((3, 3), np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+
+    mask_pixels = int(mask.sum() // 255)
+    if mask_pixels < config.min_component_pixels:
+        return False, {"reason": "insufficient_bright_pixels", "mask_pixels": mask_pixels}
+
+    gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+    grad = cv2.magnitude(gx, gy)
+
+    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(mask, 8)
+
+    best = None
+    for component_id in range(1, num_labels):
+        x, y, comp_w, comp_h, comp_area = stats[component_id]
+        if comp_area < config.min_component_area:
+            continue
+
+        aspect = comp_w / max(comp_h, 1)
+        if aspect > config.max_component_aspect:
+            continue
+
+        component_mask = labels == component_id
+        ys, xs = np.where(component_mask)
+        if len(xs) == 0:
+            continue
+
+        mean_v = float(value[ys, xs].mean())
+        mean_s = float(saturation[ys, xs].mean())
+        cx, cy = centroids[component_id]
+        center_dx = abs(cx - width / 2) / (width / 2 + 1e-6)
+        center_dy = abs(cy - height / 2) / (height / 2 + 1e-6)
+        center_score = 1.0 - 0.5 * (center_dx + center_dy)
+        mean_grad = float(grad[ys, xs].mean())
+
+        score = (
+            0.35 * min(comp_area / area / 0.08, 1.0)
+            + 0.20 * min(mean_v / 255.0, 1.0)
+            + 0.15 * min(mean_s / 255.0, 1.0)
+            + 0.20 * max(center_score, 0.0)
+            + 0.10 * min(mean_grad / 40.0, 1.0)
+        )
+
+        candidate = {
+            "bbox": [int(x), int(y), int(comp_w), int(comp_h)],
+            "area": int(comp_area),
+            "aspect": float(aspect),
+            "center_score": float(center_score),
+            "mean_v": mean_v,
+            "mean_s": mean_s,
+            "mean_grad": mean_grad,
+            "score": float(score),
+        }
+
+        if best is None or candidate["score"] > best["score"]:
+            best = candidate
+
+    if best is None:
+        return False, {"reason": "no_emissive_blob", "mask_pixels": mask_pixels}
+
+    valid = (
+        best["area"] >= config.min_component_area
+        and best["aspect"] <= config.max_component_aspect
+        and best["center_score"] >= config.min_center_score
+        and best["score"] >= config.min_score
+    )
+
+    best["reason"] = "accepted" if valid else "gate_reject"
+    best["mask_pixels"] = mask_pixels
+    return valid, best
+
+
+def make_debug_candidate(
+    bbox: tuple[int, int, int, int],
+    stage: str,
+    text: str,
+    color: tuple[int, int, int],
+) -> DebugCandidate:
+    return DebugCandidate(
+        bbox=bbox,
+        stage=stage,
+        text=text,
+        color=color,
+    )
+
+
 @torch.no_grad()
 def run_inference_on_image(
     image_bgr: np.ndarray,
@@ -273,9 +412,11 @@ def run_inference_on_image(
     min_track_frames: int,
     tracked_threshold_relaxation: float,
     crop_pad: int,
-) -> list[Detection]:
+    debug_mode: bool = False,
+) -> tuple[list[Detection], list[DebugCandidate]]:
     height, width = image_bgr.shape[:2]
     detections: list[Detection] = []
+    debug_candidates: list[DebugCandidate] = []
 
     result = yolo_model.predict(
         source=image_bgr,
@@ -283,7 +424,7 @@ def run_inference_on_image(
         verbose=False,
     )[0]
     if result.boxes is None or len(result.boxes) == 0:
-        return detections
+        return detections, debug_candidates
 
     xyxys = result.boxes.xyxy
     confs = result.boxes.conf
@@ -294,21 +435,39 @@ def run_inference_on_image(
         if yolo_cls != traffic_class_id:
             continue
 
-        raw_x1, raw_y1, raw_x2, raw_y2 = xyxys[index].tolist()
-        box_width = raw_x2 - raw_x1
-        box_height = raw_y2 - raw_y1
-        if box_width <= 0 or box_height <= 0:
-            continue
-        # Apply the aspect-ratio filter on the detector box before padding changes it.
-        if (box_width / box_height) < min_box_aspect_ratio:
-            continue
-
         x1, y1, x2, y2 = xyxy_to_int_bbox(
             xyxys[index],
             width=width,
             height=height,
             pad=crop_pad,
         )
+        raw_x1, raw_y1, raw_x2, raw_y2 = xyxys[index].tolist()
+        box_width = raw_x2 - raw_x1
+        box_height = raw_y2 - raw_y1
+        if box_width <= 0 or box_height <= 0:
+            if debug_mode:
+                debug_candidates.append(
+                    make_debug_candidate(
+                        bbox=(x1, y1, x2, y2),
+                        stage="aspect",
+                        text="reject invalid_box",
+                        color=(128, 128, 128),
+                    )
+                )
+            continue
+        # Apply the aspect-ratio filter on the detector box before padding changes it.
+        aspect_ratio = box_width / box_height
+        if aspect_ratio < min_box_aspect_ratio:
+            if debug_mode:
+                debug_candidates.append(
+                    make_debug_candidate(
+                        bbox=(x1, y1, x2, y2),
+                        stage="aspect",
+                        text=f"reject aspect={aspect_ratio:.2f}",
+                        color=(128, 128, 128),
+                    )
+                )
+            continue
         relax_thresholds = should_relax_thresholds_for_bbox(
             bbox=(x1, y1, x2, y2),
             previous_tracks=previous_tracks,
@@ -330,10 +489,47 @@ def run_inference_on_image(
 
         box_conf = float(confs[index].item())
         if box_conf < current_det_conf_thres:
+            if debug_mode:
+                debug_candidates.append(
+                    make_debug_candidate(
+                        bbox=(x1, y1, x2, y2),
+                        stage="det",
+                        text=f"reject det={box_conf:.2f}<{current_det_conf_thres:.2f}",
+                        color=(255, 255, 0),
+                    )
+                )
             continue
 
         crop = image_bgr[y1:y2, x1:x2]
         if crop.size == 0:
+            if debug_mode:
+                debug_candidates.append(
+                    make_debug_candidate(
+                        bbox=(x1, y1, x2, y2),
+                        stage="crop",
+                        text="reject empty_crop",
+                        color=(0, 128, 255),
+                    )
+                )
+            continue
+        valid_gate, gate_info = is_valid_emissive_traffic_light(crop)
+        if not valid_gate:
+            if debug_mode:
+                reason = str(gate_info.get("reason", "gate"))
+                details = []
+                if "score" in gate_info:
+                    details.append(f"score={gate_info['score']:.2f}")
+                if "mask_pixels" in gate_info:
+                    details.append(f"pix={gate_info['mask_pixels']}")
+                suffix = f" {' '.join(details)}" if details else ""
+                debug_candidates.append(
+                    make_debug_candidate(
+                        bbox=(x1, y1, x2, y2),
+                        stage="gate",
+                        text=f"reject gate={reason}{suffix}",
+                        color=(0, 165, 255),
+                    )
+                )
             continue
 
         crop_rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
@@ -343,6 +539,15 @@ def run_inference_on_image(
         cls_id = int(torch.argmax(prob).item())
         cls_conf = float(prob[cls_id].item())
         if cls_conf < current_cls_conf_thres:
+            if debug_mode:
+                debug_candidates.append(
+                    make_debug_candidate(
+                        bbox=(x1, y1, x2, y2),
+                        stage="cls",
+                        text=f"reject cls={cls_conf:.2f}<{current_cls_conf_thres:.2f}",
+                        color=(255, 0, 255),
+                    )
+                )
             continue
         cls_name = IDX2LABEL[cls_id]
 
@@ -356,7 +561,7 @@ def run_inference_on_image(
             )
         )
 
-    return detections
+    return detections, debug_candidates
 
 
 def update_tracks(
@@ -524,6 +729,43 @@ def draw_confirmed_detections(
     return vis
 
 
+def build_tracking_debug_candidates(
+    tracks: list[TrackState],
+    frame_idx: int,
+    min_track_frames: int,
+) -> list[DebugCandidate]:
+    debug_candidates: list[DebugCandidate] = []
+    for track in tracks:
+        if track.last_frame_idx != frame_idx or track.missed_frames != 0:
+            continue
+        if track.hit_streak >= min_track_frames:
+            continue
+        debug_candidates.append(
+            make_debug_candidate(
+                bbox=track.bbox,
+                stage="track",
+                text=f"pending track={track.hit_streak}/{min_track_frames}",
+                color=(255, 128, 0),
+            )
+        )
+    return debug_candidates
+
+
+def draw_debug_candidates(
+    image_bgr: np.ndarray,
+    debug_candidates: list[DebugCandidate],
+) -> np.ndarray:
+    if not debug_candidates:
+        return image_bgr
+
+    vis = image_bgr.copy()
+    for candidate in debug_candidates:
+        x1, y1, x2, y2 = candidate.bbox
+        cv2.rectangle(vis, (x1, y1), (x2, y2), candidate.color, 2)
+        draw_label(vis, candidate.text, x1, y1)
+    return vis
+
+
 def infer_device(device_arg: str) -> torch.device:
     if device_arg == "auto":
         return torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -548,11 +790,17 @@ def print_progress(
 
 
 def parse_args() -> argparse.Namespace:
-    package_dir = Path(__file__).resolve().parents[1]
-    model_dir = package_dir / "models"
+    model_dir = default_model_dir()
 
     parser = argparse.ArgumentParser(
         description="Offline traffic light inference with saved visualization outputs."
+    )
+    parser.add_argument(
+        "--mode",
+        type=str,
+        choices=("inference", "debug"),
+        default="inference",
+        help="inference saves final confirmed results, debug visualizes why candidates were filtered.",
     )
     parser.add_argument(
         "--input-root",
@@ -693,7 +941,8 @@ def main() -> None:
     if not args.classifier_ckpt.exists():
         raise FileNotFoundError(f"Classifier checkpoint not found: {args.classifier_ckpt}")
     if args.output_root is None:
-        args.output_root = args.input_root.parent / f"{args.input_root.name}_inference_vis5"
+        suffix = "inference_vis7" if args.mode == "inference" else "inference_debug_vis7"
+        args.output_root = args.input_root.parent / f"{args.input_root.name}_{suffix}"
 
     image_files = collect_image_files(args.input_root, args.source_dir_name)
     if not image_files:
@@ -707,6 +956,7 @@ def main() -> None:
     args.output_root.mkdir(parents=True, exist_ok=True)
 
     print(f"Device: {device}")
+    print(f"Mode: {args.mode}")
     print(f"Images to process: {len(image_files)}")
     print(f"YOLO weights: {args.yolo_weights}")
     print(f"Classifier checkpoint: {args.classifier_ckpt}")
@@ -721,6 +971,7 @@ def main() -> None:
     print(f"Tracked threshold relaxation: {args.tracked_threshold_relaxation}")
     print(f"Color change frames: {args.color_change_frames}")
     print(f"Save window after last bbox: {args.save_after_last_bbox}")
+    print(f"Emissive gate config: {EMISSIVE_GATE_CONFIG}")
 
     yolo_model = YOLO(str(args.yolo_weights))
     cls_model = load_classifier(args.classifier_ckpt, device)
@@ -745,7 +996,7 @@ def main() -> None:
             continue
 
         frame_idx = parse_frame_index(image_path)
-        raw_detections = run_inference_on_image(
+        raw_detections, debug_candidates = run_inference_on_image(
             image_bgr=image_bgr,
             yolo_model=yolo_model,
             cls_model=cls_model,
@@ -759,6 +1010,7 @@ def main() -> None:
             min_track_frames=args.min_track_frames,
             tracked_threshold_relaxation=args.tracked_threshold_relaxation,
             crop_pad=args.crop_pad,
+            debug_mode=args.mode == "debug",
         )
         active_tracks, detections = update_tracks(
             detections=raw_detections,
@@ -770,9 +1022,24 @@ def main() -> None:
             track_max_missed_frames=args.track_max_missed_frames,
             color_change_frames=args.color_change_frames,
         )
-        vis = draw_confirmed_detections(image_bgr, detections)
+        if args.mode == "debug":
+            debug_candidates.extend(
+                build_tracking_debug_candidates(
+                    tracks=active_tracks,
+                    frame_idx=frame_idx,
+                    min_track_frames=args.min_track_frames,
+                )
+            )
+            vis = draw_debug_candidates(image_bgr, debug_candidates)
+            vis = draw_confirmed_detections(vis, detections)
+        else:
+            vis = draw_confirmed_detections(image_bgr, detections)
 
-        if detections:
+        if args.mode == "debug":
+            if detections:
+                detected_count += 1
+            should_save = True
+        elif detections:
             detected_count += 1
             frames_since_last_detection = 0
             should_save = True

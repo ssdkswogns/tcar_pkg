@@ -4,3 +4,6 @@ src/traffic_pkg/models/best_old.pt
 src/traffic_pkg/script/__pycache__/
 __pycache__/
 *.py[cod]
+.omx
+.codex
+debug_tools/
