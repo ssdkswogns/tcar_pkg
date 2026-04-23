@@ -14,6 +14,7 @@
   <depend>rospy</depend>
   <depend>sensor_msgs</depend>
   <depend>std_msgs</depend>
+  <depend>autohyu_msgs</depend>
 
   <!-- Python3 & common libs via rosdep (system packages) -->
   <exec_depend>python3</exec_depend>

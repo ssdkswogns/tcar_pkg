@@ -1,0 +1,3 @@
+uint32 id
+autohyu_msgs/TrafficLightType type
+autohyu_msgs/TrafficLightColor color

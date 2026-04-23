@@ -1,0 +1,12 @@
+uint8 RED=1
+uint8 YELLOW=4
+uint8 RED_YELLOW=5
+uint8 GREEN=16
+uint8 RED_GREEN=17
+uint8 YELLOW_GREEN=20
+uint8 LEFT=32
+uint8 RED_LEFT=33
+uint8 YELLOW_LEFT=36
+uint8 GREEN_LEFT=48
+
+uint8 data

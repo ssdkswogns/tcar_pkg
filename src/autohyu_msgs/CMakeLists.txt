@@ -12,6 +12,9 @@ add_message_files(
   DetectObject3D.msg
   ObjectDimension.msg
   Object3DState.msg
+  TrafficLight.msg
+  TrafficLightType.msg
+  TrafficLightColor.msg
 )
 
 generate_messages(

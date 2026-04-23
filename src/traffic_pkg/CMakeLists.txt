@@ -2,17 +2,19 @@ cmake_minimum_required(VERSION 3.0.2)
 project(traffic_pkg)
 
 find_package(catkin REQUIRED COMPONENTS
+  autohyu_msgs
   rospy
   sensor_msgs
   std_msgs
 )
 
-catkin_package()
+catkin_package(
+  CATKIN_DEPENDS autohyu_msgs rospy sensor_msgs std_msgs
+)
 
 # 파이썬 노드/리소스 설치
 install(PROGRAMS
   script/inference_traffic.py
-  script/inference_traffic_legacy.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 
