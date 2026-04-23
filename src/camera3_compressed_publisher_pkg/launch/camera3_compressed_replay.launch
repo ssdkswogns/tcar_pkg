@@ -1,0 +1,33 @@
+<launch>
+  <arg name="zip_path" default="/data/camera_3__compressed.zip" />
+  <arg name="topic" default="/camera_3_undistorted/compressed" />
+  <arg name="raw_topic" default="/camera_3_undistorted" />
+  <arg name="frame_id" default="camera_3" />
+  <arg name="rate" default="30.0" />
+  <arg name="startup_delay" default="1.0" />
+  <arg name="wait_for_subscribers" default="false" />
+  <arg name="use_filename_stamp" default="true" />
+  <arg name="publish_raw" default="true" />
+  <arg name="loop" default="false" />
+  <arg name="start_index" default="0" />
+  <arg name="end_index" default="-1" />
+
+  <node
+    pkg="camera3_compressed_publisher_pkg"
+    type="publish_camera3_zip.py"
+    name="camera3_zip_publisher"
+    output="screen">
+    <param name="zip_path" value="$(arg zip_path)" />
+    <param name="topic" value="$(arg topic)" />
+    <param name="raw_topic" value="$(arg raw_topic)" />
+    <param name="frame_id" value="$(arg frame_id)" />
+    <param name="rate" value="$(arg rate)" />
+    <param name="startup_delay" value="$(arg startup_delay)" />
+    <param name="wait_for_subscribers" value="$(arg wait_for_subscribers)" />
+    <param name="use_filename_stamp" value="$(arg use_filename_stamp)" />
+    <param name="publish_raw" value="$(arg publish_raw)" />
+    <param name="loop" value="$(arg loop)" />
+    <param name="start_index" value="$(arg start_index)" />
+    <param name="end_index" value="$(arg end_index)" />
+  </node>
+</launch>
