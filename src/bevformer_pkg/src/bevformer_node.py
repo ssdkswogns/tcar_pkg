@@ -4,14 +4,15 @@ print("[PYDBG] ver :", sys.version)
 print("[PYDBG] path0:", sys.path[:5])
 os.environ.setdefault("CUDA_LAUNCH_BLOCKING", "1")
 
-# for lib in ("libnvinfer.so.8", "libnvinfer_plugin.so.8", "libcudart.so.11.8.89", "libcudnn.so.8"):
-#     try:
-#         ctypes.CDLL(lib, mode=ctypes.RTLD_GLOBAL)
-#         print(f"[DL] preloaded {lib}")
-#     except OSError as e:
-#         print(f"[DL] WARN: {lib} preload failed: {e}")
+for lib in ("libnvinfer.so.8", "libnvinfer_plugin.so.8", "libcudart.so.11.8.89", "libcudnn.so.8"):
+    try:
+        ctypes.CDLL(lib, mode=ctypes.RTLD_GLOBAL)
+        print(f"[DL] preloaded {lib}")
+    except OSError as e:
+        print(f"[DL] WARN: {lib} preload failed: {e}")
 
 import tensorrt as trt
+trt.init_libnvinfer_plugins(None, "")
 
 from cuda import cudart
 cudart.cudaFree(0)
@@ -33,9 +34,6 @@ from autohyu_msgs.msg import DetectObjects3D, DetectObject3D, ObjectDimension, O
 import rospkg
 import cv2
 import sys
-
-import threading
-from collections import deque
 
 sys.path.append(".")
 
@@ -351,44 +349,33 @@ class HostDeviceMem(object):
     def __repr__(self):
         return self.__str__()
 
-def allocate_buffers(engine, context, input_shapes):
+def allocate_buffers(engine, context, input_shapes, output_shapes):
     inputs, outputs, bindings = [], [], []
+    for binding_id, binding in enumerate(engine):
+        if engine.binding_is_input(binding):
+            dims = input_shapes[binding]
+            context.set_binding_shape(binding_id, dims)
+        else:
+            dims = output_shapes[binding]
 
-    # 1) 먼저 모든 input binding shape를 context에 설정
-    for binding_id, name in enumerate(engine):
-        if engine.binding_is_input(name):
-            dims = tuple(input_shapes[name])
-            ok = context.set_binding_shape(binding_id, dims)
-            if not ok:
-                raise RuntimeError(f"set_binding_shape failed: {name} -> {dims}")
+        size = trt.volume(dims)
+        dtype = trt.nptype(engine.get_binding_dtype(binding))
+        assert dtype == np.float32, "Engine's inputs/outputs only support FP32."
 
-    if not context.all_binding_shapes_specified:
-        raise RuntimeError("Not all binding shapes specified (dynamic shape engine).")
-
-    # 2) 이제 실제 binding shape를 context에서 읽어서 그 크기로 버퍼 할당
-    for binding_id, name in enumerate(engine):
-        dims = tuple(context.get_binding_shape(binding_id))  # 실제 shape
-        if any(d <= 0 for d in dims):
-            raise RuntimeError(f"Invalid binding shape for {name}: {dims}")
-
-        size = int(trt.volume(dims))
-        dtype = trt.nptype(engine.get_binding_dtype(name))
-        if dtype != np.float32:
-            raise RuntimeError(f"{name} dtype={dtype}, expected FP32")
-
+        # host는 일반 numpy 버퍼로 (원하면 pinned host로 확장 가능)
         host_mem = np.empty(size, dtype=dtype)
+
+        # device 메모리
         err, device_ptr = cudart.cudaMalloc(host_mem.nbytes)
-        if err != cudart.cudaError_t.cudaSuccess:
-            raise RuntimeError(f"cudaMalloc failed for {name}, bytes={host_mem.nbytes}, err={err}")
+        assert err == cudart.cudaError_t.cudaSuccess
 
         bindings.append(int(device_ptr))
-        hdm = HostDeviceMem(name, host_mem, int(device_ptr))
-        if engine.binding_is_input(name):
+
+        hdm = HostDeviceMem(binding, host_mem, int(device_ptr))
+        if engine.binding_is_input(binding):
             inputs.append(hdm)
         else:
             outputs.append(hdm)
-
-        print(f"[BUF] {name}: shape={dims}, bytes={host_mem.nbytes}")
 
     return inputs, outputs, bindings
 
@@ -518,42 +505,23 @@ class BEVFormerNode:
         PKG = 'bevformer_pkg'
         pkg_path = rp.get_path(PKG)
 
-        so_path   = os.path.join(pkg_path, 'lib', 'libmmdeploy_tensorrt_ops.so')
-        trt_path  = os.path.join(pkg_path, 'models', 'bevformer_latest.trt')
-        calib_path = os.path.join(pkg_path, 'data', 'lidar2img.npy')
+        so_path = os.path.join(pkg_path, 'lib', 'libmmdeploy_tensorrt_ops.so')
+        trt_path    = os.path.join(pkg_path, 'models', 'bevformer_latest.trt')
+        calib_path    = os.path.join(pkg_path, 'data', 'lidar2img.npy')
         rospy.loginfo(so_path)
 
         rospy.init_node('3dod_node', anonymous=True)
-        self.camera_topics = rospy.get_param('~camera_topics',
-                                             [f'/camera_{i}_undistorted/compressed' for i in range(1, 7)])
+        self.camera_topics = rospy.get_param('~camera_topics', [f'/camera_{i})_undistorted/compressed' for i in range(1, 6+1)])
         self.odom_topic = rospy.get_param('~odom_topic', '/novatel/oem7/odom')
 
-        self.pub_boxes  = rospy.Publisher("bevformer/boxes", MarkerArray, queue_size=1)
+        self.pub_boxes = rospy.Publisher("bevformer/boxes", MarkerArray, queue_size=1)
         self.pub_custom = rospy.Publisher("bevformer/detect_objects", DetectObjects3D, queue_size=1)
+        self.vis_frame = rospy.get_param("~vis_frame", "base_link")  # RViz fixed frame과 맞추세요
+        self.score_thr = rospy.get_param("~score_thr", 0.8)     # 시각화 스코어 임계값
 
-        # --- overlay publishers (6 cameras) ---
-        self.pub_overlay = []
-        for i in range(1, 7):
-            topic = f"bevformer/overlay/camera_{i}/compressed"
-            self.pub_overlay.append(rospy.Publisher(topic, CompressedImage, queue_size=1))
-
-        self.vis_frame = rospy.get_param("~vis_frame", "base_link")
-        self.score_thr = rospy.get_param("~score_thr", 0.8)
-
-        # --- 실시간 튜닝 파라미터 ---
-        self.enable_overlay   = rospy.get_param("~enable_overlay", True)
-        self.overlay_every_n  = int(rospy.get_param("~overlay_every_n", 1))  # 1=매프레임, 2=2프레임에 1번
-        self._frame_idx = 0
-
-        # --- Odom 최신값 캐시 (sync에서 제외) ---
-        self._odom_lock = threading.Lock()
-        self._latest_odom = None
-        self.odom_sub = rospy.Subscriber(self.odom_topic, Odometry, self._odom_cb, queue_size=50)
-
-        # --- TensorRT / plugin load ---
         ctypes.CDLL(so_path, mode=ctypes.RTLD_GLOBAL)
+        
         print(f"[DL] loaded plugin: {so_path}")
-
         self.tool = BEVFormerTool(
             post_center_range=[-61.2, -61.2, -10.0, 61.2, 61.2, 10.0],
             pc_range=[-51.2, -51.2, -5.0, 51.2, 51.2, 3.0],
@@ -562,11 +530,13 @@ class BEVFormerNode:
             voxel_size=[0.2, 0.2, 8],
             num_classes=4
         )
-
+        
         TRT_LOGGER = get_logger(trt.Logger.VERBOSE)
-        trt.init_libnvinfer_plugins(TRT_LOGGER, "")
+        print(f"Logger")
         self.engine, self.context, self._ctx_dmem = create_engine_context(trt_path, TRT_LOGGER)
+        trt.init_libnvinfer_plugins(TRT_LOGGER, "")
 
+        print(f"Engine Created")
         err, self.stream = cudart.cudaStreamCreate()
         assert err == cudart.cudaError_t.cudaSuccess
 
@@ -597,8 +567,8 @@ class BEVFormerNode:
 
         self.default_shapes = dict(
             batch_size=1,
-            img_h=544,
-            img_w=960,
+            img_h=544,# 480
+            img_w=960, # 800
             bev_h=self.bev_h,
             bev_w=self.bev_w,
             dim=self.dim,
@@ -609,39 +579,28 @@ class BEVFormerNode:
         )
 
         self.output_shapes_eval = self._eval_shapes(self.output_shapes, self.default_shapes)
-        self.input_shapes_eval  = self._eval_shapes(self.input_shapes, self.default_shapes)
+        self.input_shapes_eval = self._eval_shapes(self.input_shapes, self.default_shapes)
 
         self.inputs, self.outputs, self.bindings = allocate_buffers(
-            self.engine, self.context, input_shapes=self.input_shapes_eval
+            self.engine, self.context, input_shapes=self.input_shapes_eval, output_shapes=self.output_shapes_eval
         )
 
-        self.prev_frame_info = {"prev_pos": 0, "prev_angle": 0}
+        self.prev_frame_info = {
+            "prev_pos": 0,
+            "prev_angle": 0,
+        }
 
         D = self.default_shapes
         shape = (D["bev_h"] * D["bev_w"], 1, D["dim"])
         self.prev_bev = np.zeros(shape, dtype=np.float32)
         self.first = True
+        
+        subscribers = [message_filters.Subscriber(topic, CompressedImage) for topic in self.camera_topics]
+        subscribers.append(message_filters.Subscriber(self.odom_topic, Odometry))
+        self.ts = message_filters.ApproximateTimeSynchronizer(subscribers, queue_size=10, slop=0.05)
+        self.ts.registerCallback(self.callback)
 
-        # --- 카메라 6개만 sync (odom은 제외) ---
-        #   CompressedImage는 buff_size 부족 시 drop/지연이 생길 수 있어 키우는 것을 권장합니다.
-        cam_subs = [
-            message_filters.Subscriber(topic, CompressedImage, queue_size=1, buff_size=2**24)
-            for topic in self.camera_topics
-        ]
-        self.ts = message_filters.ApproximateTimeSynchronizer(cam_subs, queue_size=30, slop=0.1)
-        self.ts.registerCallback(self._cam_sync_cb)
-
-        # --- 최신 1개 큐 (drop old) + worker thread ---
-        self._q = deque(maxlen=1)
-        self._q_lock = threading.Lock()
-        self._q_cv = threading.Condition(self._q_lock)
-        self._running = True
-
-        self.worker = threading.Thread(target=self._worker_loop, daemon=True)
-        self.worker.start()
-
-        rospy.on_shutdown(self._on_shutdown)
-        rospy.loginfo("BEVFormerNode initialized (async worker mode).")
+        rospy.loginfo("BEVFormerNode initialized.")
 
     def _eval_shapes(self, shapes_dict, defaults):
         out = {}
@@ -655,122 +614,6 @@ class BEVFormerNode:
                     arr.append(s)
             out[name] = arr
         return out
-    
-    def _bbox3d_to_corners(self, box7):
-        """
-        box7: [cx, cy, cz_bottom, w, l, h, yaw]  (yaw: z축 회전)
-        return: (8,3) corners in same frame as box (x,y,z)
-        """
-        cx, cy, czb, w, l, h, yaw = [float(x) for x in box7]
-        cz = czb + 0.5 * h
-
-        # local corners (center 기준)
-        # x: length 방향, y: width 방향
-        x_c = l * 0.5
-        y_c = w * 0.5
-        z_c = h * 0.5
-
-        # 8 corners in box local frame
-        corners = np.array([
-            [ x_c,  y_c,  z_c],
-            [ x_c, -y_c,  z_c],
-            [-x_c, -y_c,  z_c],
-            [-x_c,  y_c,  z_c],
-            [ x_c,  y_c, -z_c],
-            [ x_c, -y_c, -z_c],
-            [-x_c, -y_c, -z_c],
-            [-x_c,  y_c, -z_c],
-        ], dtype=np.float32)
-
-        # yaw rotation around z
-        c = np.cos(yaw)
-        s = np.sin(yaw)
-        R = np.array([
-            [c, -s, 0.0],
-            [s,  c, 0.0],
-            [0.0, 0.0, 1.0],
-        ], dtype=np.float32)
-
-        corners = corners @ R.T
-        corners[:, 0] += cx
-        corners[:, 1] += cy
-        corners[:, 2] += cz
-        return corners
-
-
-    def _project_lidar_to_img(self, pts3, lidar2img_4x4, depth_min=0.5):
-        """
-        pts3: (N,3)
-        lidar2img_4x4: (4,4)
-        return: uv (N,2), valid (N,), depth (N,)
-        """
-        N = pts3.shape[0]
-        pts4 = np.concatenate([pts3, np.ones((N, 1), dtype=np.float32)], axis=1)  # (N,4)
-        proj = (lidar2img_4x4 @ pts4.T).T  # (N,4)
-
-        depth = proj[:, 2].astype(np.float32)
-        valid = depth > float(depth_min)
-
-        uv = np.zeros((N, 2), dtype=np.float32)
-        uv[valid, 0] = proj[valid, 0] / depth[valid]
-        uv[valid, 1] = proj[valid, 1] / depth[valid]
-        return uv, valid, depth
-
-
-    def _draw_projected_bbox(self, img_bgr, uv, valid, color, thickness=2):
-        """
-        uv: (8,2) float
-        valid: (8,) bool  (depth_min 통과 여부)
-        """
-        H, W = img_bgr.shape[:2]
-
-        # bbox edge indices for 8 corners (top:0-3, bottom:4-7)
-        edges = [
-            (0,1), (1,2), (2,3), (3,0),   # top
-            (4,5), (5,6), (6,7), (7,4),   # bottom
-            (0,4), (1,5), (2,6), (3,7)    # verticals
-        ]
-
-        rect = (0, 0, W, H)  # clipLine expects (x, y, w, h)
-
-        for i, j in edges:
-            # 둘 다 depth 유효(카메라 앞)일 때만 선분을 그림
-            if not (valid[i] and valid[j]):
-                continue
-
-            x1, y1 = float(uv[i, 0]), float(uv[i, 1])
-            x2, y2 = float(uv[j, 0]), float(uv[j, 1])
-
-            # 너무 큰 outlier는 안전하게 스킵 (분모 폭발 잔재 방지)
-            # 필요 시 계수(5)를 더 키워도 됩니다.
-            if (abs(x1) > 5*W) or (abs(x2) > 5*W) or (abs(y1) > 5*H) or (abs(y2) > 5*H):
-                continue
-
-            p1 = (int(round(x1)), int(round(y1)))
-            p2 = (int(round(x2)), int(round(y2)))
-
-            # 선분이 화면과 교차하면 교차 구간으로 잘라서 반환해줌
-            ok, q1, q2 = cv2.clipLine(rect, p1, p2)
-            if not ok:
-                continue
-
-            cv2.line(img_bgr, q1, q2, color, thickness, lineType=cv2.LINE_AA)
-
-    def _encode_compressed(self, img_bgr, stamp, frame_id, fmt="jpeg", quality=80):
-        msg = CompressedImage()
-        msg.header = Header(stamp=stamp, frame_id=frame_id)
-        msg.format = fmt
-
-        if fmt.lower() in ("jpg", "jpeg"):
-            encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), int(quality)]
-            ok, buf = cv2.imencode(".jpg", img_bgr, encode_param)
-        else:
-            ok, buf = cv2.imencode(".png", img_bgr)
-
-        if not ok:
-            raise RuntimeError("cv2.imencode failed")
-        msg.data = buf.tobytes()
-        return msg
     
     def _decode_compressed(self, msg):
         np_arr = np.frombuffer(msg.data, np.uint8)
@@ -887,285 +730,166 @@ class BEVFormerNode:
 
         return ma
 
-    # ----------------------------
-    # ✅ lightweight callbacks
-    # ----------------------------
-    def _odom_cb(self, msg: Odometry):
-        with self._odom_lock:
-            self._latest_odom = msg
-
-    def _cam_sync_cb(self, *cam_msgs):
-        # 1) 최신 odom 스냅샷 확보
-        with self._odom_lock:
-            odom = self._latest_odom
-
-        if odom is None:
-            return
-
-        # 2) 최신 1개만 유지되는 큐에 push하고 바로 return (heavy work 금지)
-        stamp = cam_msgs[0].header.stamp  # 대표 stamp (원하시면 다른 기준으로 바꿔도 됩니다)
-        with self._q_cv:
-            self._q.append((stamp, cam_msgs, odom))
-            self._q_cv.notify()
-
-    # ----------------------------
-    # ✅ worker loop
-    # ----------------------------
-    def _worker_loop(self):
-        while self._running and (not rospy.is_shutdown()):
-            with self._q_cv:
-                while self._running and len(self._q) == 0 and (not rospy.is_shutdown()):
-                    self._q_cv.wait(timeout=0.2)
-
-                if (not self._running) or rospy.is_shutdown():
-                    break
-
-                # "최신"만 꺼냄 (deque maxlen=1이므로 이미 old는 drop됨)
-                stamp, cam_msgs, odom = self._q.pop()
-
-            t0 = time.time()
-            try:
-                self._process_one(stamp, cam_msgs, odom)
-            except Exception as e:
-                import traceback as tb
-                rospy.logerr("Worker exception: %s\n%s", e, tb.format_exc())
-
-            dt_ms = (time.time() - t0) * 1000.0
-            rospy.loginfo_throttle(1.0, f"[worker] process ms: {dt_ms:.1f}")
-
-    # ----------------------------
-    # ✅ heavy work (기존 callback() 내용 이관)
-    # ----------------------------
     @torch.no_grad()
-    def _process_one(self, stamp, cam_msgs, odom):
-        # ---- (0) can_bus 계산 (기존 callback 그대로) ----
-        pos = [
-            odom.pose.pose.position.x,
-            odom.pose.pose.position.y,
-            odom.pose.pose.position.z
-        ]
-        q = [
-            odom.pose.pose.orientation.x,
-            odom.pose.pose.orientation.y,
-            odom.pose.pose.orientation.z,
-            odom.pose.pose.orientation.w,
-        ]
+    def callback(self, *msgs):
+        try:
+            if not getattr(self, "ready", True):
+                return
+            # 마지막이 Odometry, 앞은 카메라라고 가정
+            cams = msgs[:-1]
+            odom = msgs[-1]
 
-        can_bus = np.zeros(18, dtype=np.float32)
-        can_bus[:3] = copy.deepcopy(pos)
-        can_bus[3:7] = copy.deepcopy(q)
+            pos = [
+                odom.pose.pose.position.x,
+                odom.pose.pose.position.y,
+                odom.pose.pose.position.z
+                ]
+            
+            q = [
+                odom.pose.pose.orientation.x,
+                odom.pose.pose.orientation.y,
+                odom.pose.pose.orientation.z,
+                odom.pose.pose.orientation.w,
+                ]
 
-        qx, qy, qz, qw = q
-        yaw = np.arctan2(
-            2.0 * (qw * qz + qx * qy),
-            1.0 - 2.0 * (qy * qy + qz * qz)
-        )
-        patch_angle = np.degrees(yaw)
-        if patch_angle < 0:
-            patch_angle += 360
+            can_bus = np.zeros(18)
+            can_bus[:3] = copy.deepcopy(pos)
+            can_bus[3:7] = copy.deepcopy(q)
 
-        can_bus[-2] = np.radians(patch_angle)
-        can_bus[-1] = patch_angle
+            # --- Quaternion → Yaw 변환 (radians) ---
+            qx = q[0]
+            qy = q[1]
+            qz = q[2]
+            qw = q[3]
 
-        D = self.default_shapes
-        B, C, H, W = D["batch_size"], D["cameras"], D["img_h"], D["img_w"]
+            # yaw 계산 (atan2 공식)
+            yaw = np.arctan2(
+                2.0 * (qw * qz + qx * qy),
+                1.0 - 2.0 * (qy * qy + qz * qz)
+            )
 
-        # ROS → BEVFormer 입력 순서 재정렬
-        camera_reorder_indices = [2, 3, 5, 1, 0, 4]  # 0-indexed
-        cams = list(cam_msgs)
-        reordered_cams = [cams[i] for i in camera_reorder_indices]
+            # degree로 변환 및 [0, 360) 보정
+            patch_angle = np.degrees(yaw)
+            if patch_angle < 0:
+                patch_angle += 360
 
-        # ---- (1) 이미지 전처리 (기존 callback 그대로) ----
-        imgs = []
-        vis_imgs = []
-        mean = self.img_norm_cfg['mean']
-        std  = self.img_norm_cfg['std']
-        divisor = 32
+            # rad / deg 저장
+            can_bus[-2] = np.radians(patch_angle)
+            can_bus[-1] = patch_angle
 
-        for m in reordered_cams:
-            img_bgr0 = self._decode_compressed(m)  # 기존 helper 사용
+            D = self.default_shapes
+            B, C, H, W = D["batch_size"], D["cameras"], D["img_h"], D["img_w"]
 
-            # overlay용 동일 resize+pad
-            y_size = int(img_bgr0.shape[0] * 0.5)
-            x_size = int(img_bgr0.shape[1] * 0.5)
-            size = (x_size, y_size)
-            img_vis = cv2.resize(img_bgr0, size, interpolation=cv2.INTER_LINEAR)
+            # ROS → BEVFormer 입력 순서로 재정렬
+            camera_reorder_indices = [2, 3, 5, 1, 0, 4]  # 0-indexed
+            reordered_cams = [cams[i] for i in camera_reorder_indices]
 
-            pad_h = int(np.ceil(img_vis.shape[0] / divisor)) * divisor
-            pad_w = int(np.ceil(img_vis.shape[1] / divisor)) * divisor
-            img_vis = impad(img_vis, shape=(pad_h, pad_w), pad_val=0)
-            vis_imgs.append(img_vis)
+            # 이미지 스택 [B, C, 3, H, W] (예: B=1, C=6)
+            imgs = []
+            mean = self.img_norm_cfg['mean']
+            std = self.img_norm_cfg['std']
+            divisor = 32
 
-            # inference용 normalize
-            img = img_bgr0.copy().astype(np.float32)
-            mean_ = np.float64(mean.reshape(1, -1))
-            stdinv = 1 / np.float64(std.reshape(1, -1))
+            for m in reordered_cams: # BEVFormer의 이미지 전처리 순서 BGR2RGB -> Normalize -> 0.5 Scale -> Padding (32배수)
+                img = self._decode_compressed(m)  # H,W,3 (BGR)
+                
+                img = img.copy().astype(np.float32)
 
-            cv2.cvtColor(img, cv2.COLOR_BGR2RGB, img)
-            cv2.subtract(img, mean_, img)
-            cv2.multiply(img, stdinv, img)
+                # Normalize (MM NormalizeMultivieImage 대체)
+                mean = np.float64(mean.reshape(1, -1))
+                stdinv = 1 / np.float64(std.reshape(1, -1))
 
-            img = cv2.resize(img, size, interpolation=cv2.INTER_LINEAR)
-            img = impad(img, shape=(pad_h, pad_w), pad_val=0)
-            img = img.transpose(2, 0, 1)  # CHW
-            imgs.append(img)
+                cv2.cvtColor(img, cv2.COLOR_BGR2RGB, img)  # inplace
+                cv2.subtract(img, mean, img)  # inplace
+                cv2.multiply(img, stdinv, img)  # inplace
 
-        image = np.stack(imgs, axis=0)[None, ...].astype(np.float32)  # [1,6,3,H,W]
+                # 0.5 Scale
+                y_size = int(img.shape[0] * 0.5)
+                x_size = int(img.shape[1] * 0.5)
+                size = (x_size, y_size)
 
-        use_prev_bev = np.array([1.0], dtype=np.float32)
-        if self.first:
-            use_prev_bev = np.array([0.0], dtype=np.float32)
-            self.first = False
+                img = cv2.resize(
+                    img, size, dst=None, interpolation=cv2.INTER_LINEAR)
+                
+                # Padding (32배수)
+                pad_h = int(np.ceil(img.shape[0] / divisor)) * divisor
+                pad_w = int(np.ceil(img.shape[1] / divisor)) * divisor
+                img = impad(img, shape=(pad_h, pad_w), pad_val=0)
 
-        if use_prev_bev[0] == 1:
-            can_bus[:3] -= self.prev_frame_info["prev_pos"]
-            can_bus[-1] -= self.prev_frame_info["prev_angle"]
-        else:
-            can_bus[:3] -= 0
-            can_bus[-1] -= 0
+                # H,W,C -> C,H,W
+                img = img.transpose(2, 0, 1)  
+                imgs.append(img)
 
-        # ---- (2) TRT 입력 host 버퍼 채우기 ----
-        for inp in self.inputs:
-            if inp.name == "image":
-                inp.host[:] = image.reshape(-1)
-            elif inp.name == "prev_bev":
-                inp.host[:] = self.prev_bev.reshape(-1).astype(np.float32)
-            elif inp.name == "use_prev_bev":
-                inp.host[:] = use_prev_bev.reshape(-1)
-            elif inp.name == "can_bus":
-                inp.host[:] = can_bus.reshape(-1)
-            elif inp.name == "lidar2img":
-                inp.host[:] = self.lidar2img.reshape(-1).astype(np.float32)
+            image = np.stack(imgs, axis=0)[None, ...]  # shape: (1,6,3,H,W)
+            use_prev_bev = np.array([1.0])
+            if self.first:
+                use_prev_bev = np.array([0.0])
+                self.first = False
+            if use_prev_bev[0] == 1:
+                can_bus[:3] -= self.prev_frame_info["prev_pos"]
+                can_bus[-1] -= self.prev_frame_info["prev_angle"]
             else:
-                raise RuntimeError(f"Cannot find input name {inp.name}.")
+                can_bus[:3] -= 0
+                can_bus[-1] -= 0
 
-        # ---- (3) TRT inference ----
-        trt_out_list, t = do_inference(
-            self.context, bindings=self.bindings,
-            inputs=self.inputs, outputs=self.outputs, stream=self.stream
-        )
+            for inp in self.inputs:
+                if inp.name == "image":
+                    inp.host[:] = image.reshape(-1).astype(np.float32)
+                elif inp.name == "prev_bev":
+                    inp.host[:] = self.prev_bev.reshape(-1).astype(np.float32)
+                elif inp.name == "use_prev_bev":
+                    inp.host[:] = use_prev_bev.reshape(-1).astype(np.float32)
+                elif inp.name == "can_bus":
+                    inp.host[:] = can_bus.reshape(-1).astype(np.float32)
+                elif inp.name == "lidar2img":
+                    inp.host[:] = self.lidar2img.reshape(-1).astype(np.float32)
+                else:
+                    raise RuntimeError(f"Cannot find input name {inp.name}.")
+            
+            trt_out_list, t = do_inference(
+                self.context, bindings=self.bindings, inputs=self.inputs, outputs=self.outputs, stream=self.stream
+            )
 
-        trt_map = {
-            o.name: o.host.reshape(*self.output_shapes_eval[o.name]).astype(np.float32)
-            for o in trt_out_list
-        }
+            trt_map = {
+                o.name: o.host.reshape(*self.output_shapes_eval[o.name]).astype(np.float32)
+                for o in trt_out_list
+            }
 
-        self.prev_bev = trt_map.pop("bev_embed")
-        self.prev_frame_info["prev_pos"] = np.array(pos, dtype=np.float32)
-        self.prev_frame_info["prev_angle"] = patch_angle
+            self.prev_bev = trt_map.pop("bev_embed")  # shape: (bev_h*bev_w, 1, dim)
+            self.prev_frame_info["prev_pos"] = np.array(pos) # 'pos'는 list였으므로 np.array로 변환
+            self.prev_frame_info["prev_angle"] = patch_angle
 
-        trt_outputs = {k: torch.from_numpy(v) for k, v in trt_map.items()}
-        bbox_list = self.tool.post_process(**trt_outputs)
+            trt_outputs = {k: torch.from_numpy(v) for k, v in trt_map.items()}
+            # rospy.loginfo(f"scores: {trt_outputs}")
+            bbox_list = self.tool.post_process(**trt_outputs)
 
-        if not bbox_list:
+            if not bbox_list:
+                return
+
+            res = bbox_list[0]["pts_bbox"]  # {"boxes_3d","scores_3d","labels_3d"} (torch.Tensor)
+
+            boxes = res["boxes_3d"]        # (N, 7 or 9)  [cx,cy,cz_bottom,w,l,h,yaw,(vx,vy)]
+            scores = res["scores_3d"]      # (N,)
+            labels = res["labels_3d"]      # (N,)
+
+            boxes[:,6] = - boxes[:,6] - np.pi/2
+
+            ma = self._bbox_results_to_markers(bbox_list)
+            self.pub_boxes.publish(ma)
+
+            det_msg = self._bbox_results_to_detectobjects(bbox_list)
+            self.pub_custom.publish(det_msg)  
+
+            # 실제로 그려진 마커 개수로 로그
+            rospy.loginfo_throttle(1.0, f"Published {len(ma.markers)} boxes (raw={int(scores.shape[0])})")
+        except Exception as e:
+            import traceback as tb
+            rospy.logerr("Callback exception: %s\n%s", e, tb.format_exc())
             return
-
-        # yaw 보정(기존 코드 유지)
-        res = bbox_list[0]["pts_bbox"]
-        boxes = res["boxes_3d"]
-        if boxes.numel() > 0:
-            boxes[:, 6] = -boxes[:, 6] - np.pi/2
-
-        # ---- (4) overlay (옵션/저주기) ----
-        self._frame_idx += 1
-        do_overlay = self.enable_overlay and (self._frame_idx % self.overlay_every_n == 0)
-
-        if do_overlay:
-            boxes_np  = res["boxes_3d"].cpu().numpy()
-            scores_np = res["scores_3d"].cpu().numpy()
-            labels_np = res["labels_3d"].cpu().numpy()
-
-            palette_bgr = [
-                ( 50, 200,  50),
-                (255, 160,  50),
-                ( 50, 150, 255),
-                ( 60,  60, 255),
-            ]
-
-            # stamp는 "입력 프레임 stamp" 유지 권장 (Time.now()로 바꾸면 동기화가 흔들립니다)
-            out_stamp = stamp
-
-            lidar2img = self.lidar2img
-            if lidar2img.ndim == 4:
-                lidar2img_cams = lidar2img[0]   # (6,4,4)
-            elif lidar2img.ndim == 3:
-                lidar2img_cams = lidar2img      # (6,4,4)
-            else:
-                raise RuntimeError(f"Unexpected lidar2img shape: {lidar2img.shape}")
-
-            depth_min = 0
-
-            for net_i in range(6):
-                img_vis = vis_imgs[net_i].copy()
-                P = lidar2img_cams[net_i].astype(np.float32)
-                HH, WW = img_vis.shape[:2]
-
-                for bi in range(boxes_np.shape[0]):
-                    if scores_np[bi] < self.score_thr:
-                        continue
-
-                    box7 = boxes_np[bi, :7].copy()
-
-                    # center gating
-                    cx, cy, czb, w_box, l_box, h_box, yaw_ = [float(x) for x in box7]
-                    cz = czb + 0.5 * h_box
-                    center = np.array([[cx, cy, cz]], dtype=np.float32)
-
-                    uv_c, valid_c, depth_c = self._project_lidar_to_img(center, P, depth_min=depth_min)
-                    if not valid_c[0]:
-                        continue
-                    u0, v0 = float(uv_c[0,0]), float(uv_c[0,1])
-                    if not (-50 <= u0 < WW + 50 and -50 <= v0 < HH + 50):
-                        continue
-
-                    corners = self._bbox3d_to_corners(box7)
-                    uv, valid, depth = self._project_lidar_to_img(corners, P, depth_min=depth_min)
-                    if int(valid.sum()) < 6:
-                        continue
-
-                    color = palette_bgr[int(labels_np[bi]) % len(palette_bgr)]
-                    self._draw_projected_bbox(img_vis, uv, valid, color=color, thickness=2)
-
-                cam_orig_i = camera_reorder_indices[net_i]  # net->orig
-                out_msg = self._encode_compressed(
-                    img_vis,
-                    stamp=out_stamp,
-                    frame_id=f"camera_{cam_orig_i+1}",
-                    fmt="jpeg",
-                    quality=80
-                )
-                self.pub_overlay[cam_orig_i].publish(out_msg)
-
-        # ---- (5) markers + custom msg publish ----
-        ma = self._bbox_results_to_markers(bbox_list)
-        self.pub_boxes.publish(ma)
-
-        det_msg = self._bbox_results_to_detectobjects(bbox_list)
-        self.pub_custom.publish(det_msg)
-
-        rospy.loginfo_throttle(1.0, f"Published {len(ma.markers)} boxes")
-
-    # ----------------------------
-    # ✅ shutdown
-    # ----------------------------
-    def _on_shutdown(self):
-        self._running = False
-        try:
-            with self._q_cv:
-                self._q_cv.notify_all()
-        except Exception:
-            pass
-
-        try:
-            if hasattr(self, "worker") and self.worker.is_alive():
-                self.worker.join(timeout=1.0)
-        except Exception:
-            pass
-
+        
     def spin(self):
         rospy.loginfo("BEVFormerNode spinning...")
         rospy.spin()
-
 
 if __name__ == "__main__":
     node = BEVFormerNode()

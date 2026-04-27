@@ -10,28 +10,40 @@ import numpy as np
 import rospkg
 import rospy
 import torch
-from autohyu_msgs.msg import TrafficLight, TrafficLightColor, TrafficLightType
+from autohyu_msgs.msg import TrafficLight
 from PIL import Image
 from sensor_msgs.msg import CompressedImage
 from ultralytics import YOLO
 
+from traffic_light_constants import (
+    COLOR_GREEN,
+    COLOR_GREEN_LEFT,
+    COLOR_LEFT,
+    COLOR_RED,
+    COLOR_RED_GREEN,
+    COLOR_RED_LEFT,
+    COLOR_RED_YELLOW,
+    COLOR_YELLOW,
+    COLOR_YELLOW_GREEN,
+    COLOR_YELLOW_LEFT,
+    TYPE_PED_RED_GREEN,
+    TYPE_RED_YELLOW_LEFT,
+)
+
 
 TRAFFIC_LIGHT_COLOR_BY_STATE = {
-    "red": TrafficLightColor.RED,
-    "yellow": TrafficLightColor.YELLOW,
-    "redyellow": TrafficLightColor.RED_YELLOW,
-    "green": TrafficLightColor.GREEN,
-    "redgreen": TrafficLightColor.RED_GREEN,
-    "yellowgreen": TrafficLightColor.YELLOW_GREEN,
-    "left": TrafficLightColor.LEFT,
-    "redleft": TrafficLightColor.RED_LEFT,
-    "yellowleft": TrafficLightColor.YELLOW_LEFT,
-    "greenleft": TrafficLightColor.GREEN_LEFT,
-    "leftgreen": TrafficLightColor.GREEN_LEFT,
+    "red": COLOR_RED,
+    "yellow": COLOR_YELLOW,
+    "redyellow": COLOR_RED_YELLOW,
+    "green": COLOR_GREEN,
+    "redgreen": COLOR_RED_GREEN,
+    "yellowgreen": COLOR_YELLOW_GREEN,
+    "left": COLOR_LEFT,
+    "redleft": COLOR_RED_LEFT,
+    "yellowleft": COLOR_YELLOW_LEFT,
+    "greenleft": COLOR_GREEN_LEFT,
+    "leftgreen": COLOR_GREEN_LEFT,
 }
-
-YELLOW_BLINK_STATE_KEYS = {"yellowyellowyellow", "yellowblink", "blinkyellow"}
-
 
 @dataclass
 class Detection:
@@ -62,29 +74,14 @@ def resolve_yolo_device_arg(device_arg: str) -> str:
     return device_arg
 
 
-def normalize_traffic_type(raw_name: str) -> Optional[str]:
-    lowered = str(raw_name).strip().lower()
-    if "ped" in lowered or "walker" in lowered:
-        return "pedestrian"
-    if "car" in lowered or "veh" in lowered:
-        return "car"
-    return None
-
-
 def normalize_state_key(raw_name: str) -> str:
     return "".join(char for char in str(raw_name).strip().lower() if char.isalnum())
 
 
-def infer_traffic_light_type(traffic_type: str, state_key: str) -> int:
+def infer_traffic_light_type(traffic_type: str) -> int:
     if traffic_type == "pedestrian":
-        return TrafficLightType.PED_RED_GREEN
-    if state_key in YELLOW_BLINK_STATE_KEYS:
-        return TrafficLightType.YELLOW_YELLOW_YELLOW
-    if "left" in state_key and "green" in state_key:
-        return TrafficLightType.RED_YELLOW_LEFT_GREEN
-    if "left" in state_key:
-        return TrafficLightType.RED_YELLOW_LEFT
-    return TrafficLightType.RED_YELLOW_GREEN
+        return TYPE_PED_RED_GREEN
+    return TYPE_RED_YELLOW_LEFT
 
 
 def clip_bbox(
@@ -286,9 +283,8 @@ class TrafficLightRosNode:
         ped_indices = []
 
         for box, det_conf, cls_id in zip(boxes, confs, cls_ids):
-            raw_detector_name = str(self.detector_names.get(int(cls_id), str(cls_id)))
-            traffic_type = normalize_traffic_type(raw_detector_name)
-            if traffic_type is None:
+            traffic_type = str(self.detector_names.get(int(cls_id), str(cls_id))).strip().lower()
+            if traffic_type not in ("car", "pedestrian"):
                 continue
 
             det_conf = float(det_conf)
@@ -341,7 +337,7 @@ class TrafficLightRosNode:
 
         return detections
 
-    def _to_traffic_light_msg(self, detection: Detection, detection_id: int) -> Optional[TrafficLight]:
+    def _to_traffic_light_msg(self, detection: Detection, detection_id: int, header) -> Optional[TrafficLight]:
         state_key = normalize_state_key(detection.state_name)
         color_value = TRAFFIC_LIGHT_COLOR_BY_STATE.get(state_key)
         if color_value is None:
@@ -349,11 +345,13 @@ class TrafficLightRosNode:
             return None
 
         msg = TrafficLight()
-        msg.id = detection_id
-        msg.type = TrafficLightType()
-        msg.type.data = infer_traffic_light_type(detection.traffic_type, state_key)
-        msg.color = TrafficLightColor()
-        msg.color.data = color_value
+        msg.header.seq = header.seq
+        msg.header.stamp = header.stamp
+        msg.header.frame_id = header.frame_id
+        msg.id = str(detection_id)
+        msg.type = infer_traffic_light_type(detection.traffic_type)
+        msg.color = color_value
+        msg.bbox_xmin, msg.bbox_ymin, msg.bbox_xmax, msg.bbox_ymax = detection.bbox
         return msg
 
     @torch.inference_mode()
@@ -382,7 +380,7 @@ class TrafficLightRosNode:
                 y1,
             )
 
-            traffic_light_msg = self._to_traffic_light_msg(detection, detection_id)
+            traffic_light_msg = self._to_traffic_light_msg(detection, detection_id, msg.header)
             if traffic_light_msg is not None:
                 self.pub_dets.publish(traffic_light_msg)
 

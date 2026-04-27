@@ -18,6 +18,11 @@ install(PROGRAMS
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 
+install(FILES
+  script/traffic_light_constants.py
+  DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
+)
+
 # 가중치/체크포인트 등 리소스 동봉 시 (패키지 내부 models/ 디렉토리)
 install(DIRECTORY
   models

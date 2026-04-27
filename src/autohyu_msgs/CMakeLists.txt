@@ -13,8 +13,6 @@ add_message_files(
   ObjectDimension.msg
   Object3DState.msg
   TrafficLight.msg
-  TrafficLightType.msg
-  TrafficLightColor.msg
 )
 
 generate_messages(
@@ -23,5 +21,15 @@ generate_messages(
 )
 
 catkin_package(
+  INCLUDE_DIRS include
   CATKIN_DEPENDS message_runtime std_msgs
+)
+
+include_directories(
+  include
+  ${catkin_INCLUDE_DIRS}
+)
+
+install(DIRECTORY include/${PROJECT_NAME}/
+  DESTINATION ${CATKIN_PACKAGE_INCLUDE_DESTINATION}
 )
