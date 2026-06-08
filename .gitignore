@@ -1,6 +1,13 @@
 src/bevformer_pkg/models/bevformer_latest.trt
 src/bevformer_pkg/models/tcar_latest_old.trt
 src/traffic_pkg/models/best_old.pt
+
+# Catkin build outputs
+build/
+devel/
+install/
+logs/
+
 src/traffic_pkg/script/__pycache__/
 __pycache__/
 *.py[cod]
