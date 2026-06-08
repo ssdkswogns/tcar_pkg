@@ -47,6 +47,8 @@ TRAFFIC_LIGHT_COLOR_BY_STATE = {
 DEFAULT_STAGE1_WEIGHTS = "0608_stage1.pt"
 DEFAULT_STAGE2_WEIGHTS = "0608_stage2.pt"
 CAR_TRAFFIC_TYPE = "car"
+GPU_YOLO_DEVICE = "0"
+GPU_TORCH_DEVICE = torch.device("cuda:0")
 
 
 @dataclass
@@ -58,24 +60,10 @@ class Detection:
     cls_conf: float
 
 
-def resolve_torch_device(device_arg: str) -> torch.device:
-    if device_arg == "auto":
-        if torch.cuda.is_available() and torch.cuda.device_count() > 0:
-            return torch.device("cuda:0")
-        return torch.device("cpu")
-    if device_arg.startswith("cuda") and not torch.cuda.is_available():
-        return torch.device("cpu")
-    return torch.device(device_arg)
-
-
-def resolve_yolo_device_arg(device_arg: str) -> str:
-    if device_arg == "auto":
-        if torch.cuda.is_available() and torch.cuda.device_count() > 0:
-            return "0"
-        return "cpu"
-    if device_arg.startswith("cuda") and not torch.cuda.is_available():
-        return "cpu"
-    return device_arg
+def require_cuda_device() -> None:
+    if not torch.cuda.is_available() or torch.cuda.device_count() == 0:
+        raise RuntimeError("traffic_pkg requires a CUDA GPU; CPU inference is disabled.")
+    torch.cuda.set_device(0)
 
 
 def normalize_state_key(raw_name: str) -> str:
@@ -180,13 +168,12 @@ class TrafficLightRosNode:
         self.iou = float(rospy.get_param("~iou", 0.7))
         self.padding_ratio = float(rospy.get_param("~padding_ratio", 0.1))
         self.imgsz = int(rospy.get_param("~imgsz", 640))
-        self.device_arg = rospy.get_param("~device", "auto")
-        self.cls_device_arg = rospy.get_param("~cls_device", "auto")
         self.pub_det_topic = rospy.get_param("~pub_detections_topic", "/traffic/detections")
         self.pub_img_topic = rospy.get_param("~pub_image_topic", "/traffic/image_bbox/compressed")
 
-        self.detector_device = resolve_yolo_device_arg(self.device_arg)
-        self.classifier_device = resolve_torch_device(self.cls_device_arg)
+        require_cuda_device()
+        self.detector_device = GPU_YOLO_DEVICE
+        self.classifier_device = GPU_TORCH_DEVICE
 
         self.stage1_detector = YOLO(self.stage1_weights)
         self.detector_names = getattr(self.stage1_detector, "names", {}) or {}

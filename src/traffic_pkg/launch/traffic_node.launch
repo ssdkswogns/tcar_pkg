@@ -4,19 +4,17 @@
   <arg name="use_sim_time"       default="false" />
 
   <!-- 구독/발행 토픽 -->
-  <arg name="image_topic"        default="/camera_3_undistorted/compressed" />
+  <arg name="image_topic"        default="/camera_4/compressed" />
   <arg name="pub_detections"     default="/traffic/detections" />
   <arg name="pub_image"          default="/traffic/image_bbox/compressed" />
 
   <!-- 모델/파라미터 (models/ 아래 파일명만 지정하세요) -->
   <arg name="stage1_weights"     default="0608_stage1.pt" />
   <arg name="stage2_weights"     default="0608_stage2.pt" />
-  <arg name="det_conf"           default="0.2" />
+  <arg name="det_conf"           default="0.4" />
   <arg name="iou"                default="0.7" />
   <arg name="padding_ratio"      default="0.1" />
   <arg name="imgsz"              default="640" />
-  <arg name="device"             default="auto" />
-  <arg name="cls_device"         default="auto" />
 
   <group ns="$(arg ns)">
     <param name="/use_sim_time" value="$(arg use_sim_time)"/>
@@ -37,8 +35,6 @@
       <param name="iou"                  value="$(arg iou)"/>
       <param name="padding_ratio"        value="$(arg padding_ratio)"/>
       <param name="imgsz"                value="$(arg imgsz)"/>
-      <param name="device"               value="$(arg device)"/>
-      <param name="cls_device"           value="$(arg cls_device)"/>
       <param name="pub_detections_topic" value="$(arg pub_detections)"/>
       <param name="pub_image_topic"      value="$(arg pub_image)"/>
 
