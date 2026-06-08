@@ -8,7 +8,6 @@ _REQUIRED_CONSTANTS = (
     "TYPE_RED_YELLOW_GREEN",
     "TYPE_RED_YELLOW_LEFT",
     "TYPE_RED_YELLOW_LEFT_GREEN",
-    "TYPE_PED_RED_GREEN",
     "TYPE_YELLOW_YELLOW_YELLOW",
     "COLOR_RED",
     "COLOR_YELLOW",
@@ -28,18 +27,23 @@ _CONSTANT_PATTERN = re.compile(
 
 
 def _candidate_header_paths():
-    package_path = rospkg.RosPack().get_path("autohyu_msgs")
     return (
-        os.path.join(package_path, "include", "autohyu_msgs", "traffic_light_constants.h"),
         os.path.abspath(
             os.path.join(
-                package_path,
+                os.path.dirname(__file__),
                 os.pardir,
                 os.pardir,
+                "autohyu_msgs",
                 "include",
                 "autohyu_msgs",
                 "traffic_light_constants.h",
             )
+        ),
+        os.path.join(
+            rospkg.RosPack().get_path("autohyu_msgs"),
+            "include",
+            "autohyu_msgs",
+            "traffic_light_constants.h",
         ),
     )
 
