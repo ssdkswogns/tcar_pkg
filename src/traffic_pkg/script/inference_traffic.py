@@ -26,7 +26,6 @@ from traffic_light_constants import (
     COLOR_YELLOW,
     COLOR_YELLOW_GREEN,
     COLOR_YELLOW_LEFT,
-    TYPE_PED_RED_GREEN,
     TYPE_RED_YELLOW_LEFT,
 )
 
@@ -44,6 +43,11 @@ TRAFFIC_LIGHT_COLOR_BY_STATE = {
     "greenleft": COLOR_GREEN_LEFT,
     "leftgreen": COLOR_GREEN_LEFT,
 }
+
+DEFAULT_STAGE1_WEIGHTS = "0608_stage1.pt"
+DEFAULT_STAGE2_WEIGHTS = "0608_stage2.pt"
+CAR_TRAFFIC_TYPE = "car"
+
 
 @dataclass
 class Detection:
@@ -78,9 +82,12 @@ def normalize_state_key(raw_name: str) -> str:
     return "".join(char for char in str(raw_name).strip().lower() if char.isalnum())
 
 
-def infer_traffic_light_type(traffic_type: str) -> int:
-    if traffic_type == "pedestrian":
-        return TYPE_PED_RED_GREEN
+def is_car_traffic_light(raw_name: str) -> bool:
+    lowered = str(raw_name).strip().lower()
+    return "car" in lowered or "veh" in lowered
+
+
+def infer_traffic_light_type() -> int:
     return TYPE_RED_YELLOW_LEFT
 
 
@@ -162,21 +169,14 @@ class TrafficLightRosNode:
         pkg_path = rospkg.RosPack().get_path("traffic_pkg")
 
         self.image_topic = rospy.get_param("~image_topic", "/camera_3_undistorted/compressed")
-        self.stage1_weights = os.path.join(pkg_path, "models", rospy.get_param("~stage1_weights", "0413_stage1.pt"))
-        self.car_state_weights = os.path.join(
+        self.stage1_weights = os.path.join(
             pkg_path,
             "models",
-            rospy.get_param("~car_state_weights", "0415_stage2_car_yolo.pt"),
+            rospy.get_param("~stage1_weights", DEFAULT_STAGE1_WEIGHTS),
         )
-        self.ped_state_weights = os.path.join(
-            pkg_path,
-            "models",
-            rospy.get_param("~ped_state_weights", "0415_stage2_ped_yolo.pt"),
-        )
-        self.det_conf = float(rospy.get_param("~det_conf", 0.25))
-        self.car_det_conf = float(rospy.get_param("~car_det_conf", 0.5))
-        self.ped_det_conf = float(rospy.get_param("~ped_det_conf", 0.3))
-        self.cls_conf = float(rospy.get_param("~cls_conf", 0.0))
+        stage2_weights_name = rospy.get_param("~stage2_weights", DEFAULT_STAGE2_WEIGHTS)
+        self.stage2_weights = os.path.join(pkg_path, "models", stage2_weights_name)
+        self.det_conf = float(rospy.get_param("~det_conf", 0.2))
         self.iou = float(rospy.get_param("~iou", 0.7))
         self.padding_ratio = float(rospy.get_param("~padding_ratio", 0.1))
         self.imgsz = int(rospy.get_param("~imgsz", 640))
@@ -191,8 +191,7 @@ class TrafficLightRosNode:
         self.stage1_detector = YOLO(self.stage1_weights)
         self.detector_names = getattr(self.stage1_detector, "names", {}) or {}
 
-        self.car_classifier = self._load_classifier(self.car_state_weights)
-        self.ped_classifier = self._load_classifier(self.ped_state_weights)
+        self.stage2_classifier = self._load_classifier(self.stage2_weights)
 
         self.pub_dets = rospy.Publisher(self.pub_det_topic, TrafficLight, queue_size=1)
         self.pub_img = rospy.Publisher(self.pub_img_topic, CompressedImage, queue_size=1)
@@ -277,21 +276,14 @@ class TrafficLightRosNode:
         cls_ids = result.boxes.cls.detach().cpu().numpy().astype(int)
 
         candidates = []
-        car_crops = []
-        ped_crops = []
-        car_indices = []
-        ped_indices = []
+        crops = []
 
         for box, det_conf, cls_id in zip(boxes, confs, cls_ids):
-            traffic_type = str(self.detector_names.get(int(cls_id), str(cls_id))).strip().lower()
-            if traffic_type not in ("car", "pedestrian"):
+            raw_detector_name = str(self.detector_names.get(int(cls_id), str(cls_id)))
+            if not is_car_traffic_light(raw_detector_name):
                 continue
 
             det_conf = float(det_conf)
-            type_threshold = self.car_det_conf if traffic_type == "car" else self.ped_det_conf
-            if det_conf < type_threshold:
-                continue
-
             crop_bbox = pad_bbox(box.tolist(), self.padding_ratio, img_w, img_h)
             x1, y1, x2, y2 = crop_bbox
             crop = image_bgr[y1:y2, x1:x2]
@@ -300,31 +292,15 @@ class TrafficLightRosNode:
 
             candidate = {
                 "bbox": clip_bbox(box.tolist(), img_w, img_h),
-                "traffic_type": traffic_type,
+                "traffic_type": CAR_TRAFFIC_TYPE,
                 "det_conf": det_conf,
             }
-            candidate_index = len(candidates)
             candidates.append(candidate)
-            if traffic_type == "car":
-                car_crops.append(crop)
-                car_indices.append(candidate_index)
-            else:
-                ped_crops.append(crop)
-                ped_indices.append(candidate_index)
-
-        predictions = [None] * len(candidates)
-        for candidate_index, prediction in zip(car_indices, self._classify_crops(car_crops, self.car_classifier)):
-            predictions[candidate_index] = prediction
-        for candidate_index, prediction in zip(ped_indices, self._classify_crops(ped_crops, self.ped_classifier)):
-            predictions[candidate_index] = prediction
+            crops.append(crop)
 
         detections = []
-        for candidate, prediction in zip(candidates, predictions):
-            if prediction is None:
-                continue
+        for candidate, prediction in zip(candidates, self._classify_crops(crops, self.stage2_classifier)):
             state_name, cls_conf = prediction
-            if cls_conf < self.cls_conf:
-                continue
             detections.append(
                 Detection(
                     bbox=candidate["bbox"],
@@ -349,7 +325,7 @@ class TrafficLightRosNode:
         msg.header.stamp = header.stamp
         msg.header.frame_id = header.frame_id
         msg.id = str(detection_id)
-        msg.type = infer_traffic_light_type(detection.traffic_type)
+        msg.type = infer_traffic_light_type()
         msg.color = color_value
         msg.bbox_xmin, msg.bbox_ymin, msg.bbox_xmax, msg.bbox_ymax = detection.bbox
         return msg

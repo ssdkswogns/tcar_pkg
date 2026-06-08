@@ -9,13 +9,9 @@
   <arg name="pub_image"          default="/traffic/image_bbox/compressed" />
 
   <!-- 모델/파라미터 (models/ 아래 파일명만 지정하세요) -->
-  <arg name="stage1_weights"     default="0413_stage1.pt" />
-  <arg name="car_state_weights"  default="0415_stage2_car_yolo.pt" />
-  <arg name="ped_state_weights"  default="0415_stage2_ped_yolo.pt" />
-  <arg name="det_conf"           default="0.25" />
-  <arg name="car_det_conf"       default="0.5" />
-  <arg name="ped_det_conf"       default="0.3" />
-  <arg name="cls_conf"           default="0.0" />
+  <arg name="stage1_weights"     default="0608_stage1.pt" />
+  <arg name="stage2_weights"     default="0608_stage2.pt" />
+  <arg name="det_conf"           default="0.2" />
   <arg name="iou"                default="0.7" />
   <arg name="padding_ratio"      default="0.1" />
   <arg name="imgsz"              default="640" />
@@ -36,12 +32,8 @@
       <!-- private params (~) -->
       <param name="image_topic"          value="$(arg image_topic)"/>
       <param name="stage1_weights"       value="$(arg stage1_weights)"/>
-      <param name="car_state_weights"    value="$(arg car_state_weights)"/>
-      <param name="ped_state_weights"    value="$(arg ped_state_weights)"/>
+      <param name="stage2_weights"       value="$(arg stage2_weights)"/>
       <param name="det_conf"             value="$(arg det_conf)"/>
-      <param name="car_det_conf"         value="$(arg car_det_conf)"/>
-      <param name="ped_det_conf"         value="$(arg ped_det_conf)"/>
-      <param name="cls_conf"             value="$(arg cls_conf)"/>
       <param name="iou"                  value="$(arg iou)"/>
       <param name="padding_ratio"        value="$(arg padding_ratio)"/>
       <param name="imgsz"                value="$(arg imgsz)"/>
