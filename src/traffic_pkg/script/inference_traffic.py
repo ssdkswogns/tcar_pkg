@@ -10,7 +10,7 @@ import numpy as np
 import rospkg
 import rospy
 import torch
-from autohyu_msgs.msg import TrafficLight
+from autohyu_msgs.msg import TrafficLight, TrafficLights
 from PIL import Image
 from sensor_msgs.msg import CompressedImage
 from ultralytics import YOLO
@@ -180,7 +180,7 @@ class TrafficLightRosNode:
 
         self.stage2_classifier = self._load_classifier(self.stage2_weights)
 
-        self.pub_dets = rospy.Publisher(self.pub_det_topic, TrafficLight, queue_size=1)
+        self.pub_dets = rospy.Publisher(self.pub_det_topic, TrafficLights, queue_size=1)
         self.pub_img = rospy.Publisher(self.pub_img_topic, CompressedImage, queue_size=1)
         rospy.Subscriber(
             self.image_topic,
@@ -326,6 +326,7 @@ class TrafficLightRosNode:
 
         detections = self._collect_detections(img_bgr)
         vis = img_bgr.copy()
+        traffic_light_msgs = []
 
         for detection_id, detection in enumerate(detections):
             x1, y1, x2, y2 = detection.bbox
@@ -345,7 +346,14 @@ class TrafficLightRosNode:
 
             traffic_light_msg = self._to_traffic_light_msg(detection, detection_id, msg.header)
             if traffic_light_msg is not None:
-                self.pub_dets.publish(traffic_light_msg)
+                traffic_light_msgs.append(traffic_light_msg)
+
+        detections_msg = TrafficLights()
+        detections_msg.header.seq = msg.header.seq
+        detections_msg.header.stamp = msg.header.stamp
+        detections_msg.header.frame_id = msg.header.frame_id
+        detections_msg.lights = traffic_light_msgs
+        self.pub_dets.publish(detections_msg)
 
         vis_msg = CompressedImage()
         vis_msg.header = msg.header

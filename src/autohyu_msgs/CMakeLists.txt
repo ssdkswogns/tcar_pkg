@@ -13,6 +13,7 @@ add_message_files(
   ObjectDimension.msg
   Object3DState.msg
   TrafficLight.msg
+  TrafficLights.msg
 )
 
 generate_messages(
