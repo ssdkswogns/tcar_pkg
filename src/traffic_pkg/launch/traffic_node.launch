@@ -10,7 +10,7 @@
 
   <!-- 모델/파라미터 (models/ 아래 파일명만 지정하세요) -->
   <arg name="stage1_weights"     default="0608_stage1.pt" />
-  <arg name="stage2_weights"     default="0608_stage2.pt" />
+  <arg name="stage2_weights"     default="0624_stage2_3.pt" />
   <arg name="det_conf"           default="0.4" />
   <arg name="iou"                default="0.7" />
   <arg name="padding_ratio"      default="0.1" />
