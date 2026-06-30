@@ -19,6 +19,7 @@ install(PROGRAMS
 )
 
 install(FILES
+  script/color_decision_tree.py
   script/traffic_light_constants.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )

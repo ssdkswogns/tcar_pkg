@@ -15,6 +15,10 @@ from PIL import Image
 from sensor_msgs.msg import CompressedImage
 from ultralytics import YOLO
 
+from color_decision_tree import (
+    DEFAULT_PROB_THRESHOLD,
+    ColorDecisionTreeClassifier,
+)
 from traffic_light_constants import (
     COLOR_GREEN,
     COLOR_GREEN_LEFT,
@@ -170,6 +174,15 @@ class TrafficLightRosNode:
         self.imgsz = int(rospy.get_param("~imgsz", 640))
         self.pub_det_topic = rospy.get_param("~pub_detections_topic", "/traffic/detections")
         self.pub_img_topic = rospy.get_param("~pub_image_topic", "/traffic/image_bbox/compressed")
+        self.unknown_color_tree_enabled = bool(
+            rospy.get_param("~unknown_color_tree_enabled", True)
+        )
+        self.unknown_color_tree_min_aspect_ratio = float(
+            rospy.get_param("~unknown_color_tree_min_aspect_ratio", 2.0)
+        )
+        self.unknown_color_tree_prob_threshold = float(
+            rospy.get_param("~unknown_color_tree_prob_threshold", DEFAULT_PROB_THRESHOLD)
+        )
 
         require_cuda_device()
         self.detector_device = GPU_YOLO_DEVICE
@@ -179,6 +192,11 @@ class TrafficLightRosNode:
         self.detector_names = getattr(self.stage1_detector, "names", {}) or {}
 
         self.stage2_classifier = self._load_classifier(self.stage2_weights)
+        self.unknown_color_tree = (
+            ColorDecisionTreeClassifier(self.unknown_color_tree_prob_threshold)
+            if self.unknown_color_tree_enabled
+            else None
+        )
 
         self.pub_dets = rospy.Publisher(self.pub_det_topic, TrafficLights, queue_size=1)
         self.pub_img = rospy.Publisher(self.pub_img_topic, CompressedImage, queue_size=1)
@@ -243,6 +261,42 @@ class TrafficLightRosNode:
             predictions.append((str(class_names[pred_index]), pred_conf))
         return predictions
 
+    def _maybe_override_unknown_state(
+        self,
+        state_name: str,
+        cls_conf: float,
+        crop_bgr: np.ndarray,
+        bbox: Tuple[int, int, int, int],
+    ) -> Optional[Tuple[str, float]]:
+        if normalize_state_key(state_name) != "unknown":
+            return state_name, cls_conf
+
+        x1, y1, x2, y2 = bbox
+        width = max(1, x2 - x1)
+        height = max(1, y2 - y1)
+        aspect_ratio = float(width) / float(height)
+        if aspect_ratio < self.unknown_color_tree_min_aspect_ratio:
+            rospy.logdebug(
+                "Dropping unknown traffic light candidate with aspect %.3f < %.3f",
+                aspect_ratio,
+                self.unknown_color_tree_min_aspect_ratio,
+            )
+            return None
+
+        if self.unknown_color_tree is None:
+            return state_name, cls_conf
+
+        tree_state, tree_conf = self.unknown_color_tree.classify(crop_bgr, bbox)
+        if tree_state != "unknown":
+            rospy.logdebug(
+                "Unknown classifier result overridden by color tree: %s (%.3f)",
+                tree_state,
+                tree_conf,
+            )
+            return tree_state, tree_conf
+
+        return state_name, cls_conf
+
     @torch.inference_mode()
     def _collect_detections(self, image_bgr: np.ndarray) -> List[Detection]:
         result = self.stage1_detector.predict(
@@ -286,8 +340,21 @@ class TrafficLightRosNode:
             crops.append(crop)
 
         detections = []
-        for candidate, prediction in zip(candidates, self._classify_crops(crops, self.stage2_classifier)):
+        for candidate, crop, prediction in zip(
+            candidates,
+            crops,
+            self._classify_crops(crops, self.stage2_classifier),
+        ):
             state_name, cls_conf = prediction
+            override = self._maybe_override_unknown_state(
+                state_name,
+                float(cls_conf),
+                crop,
+                candidate["bbox"],
+            )
+            if override is None:
+                continue
+            state_name, cls_conf = override
             detections.append(
                 Detection(
                     bbox=candidate["bbox"],

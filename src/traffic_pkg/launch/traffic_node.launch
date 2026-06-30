@@ -15,6 +15,9 @@
   <arg name="iou"                default="0.7" />
   <arg name="padding_ratio"      default="0.1" />
   <arg name="imgsz"              default="640" />
+  <arg name="unknown_color_tree_enabled"          default="true" />
+  <arg name="unknown_color_tree_min_aspect_ratio" default="2.0" />
+  <arg name="unknown_color_tree_prob_threshold"   default="0.7" />
 
   <group ns="$(arg ns)">
     <param name="/use_sim_time" value="$(arg use_sim_time)"/>
@@ -35,6 +38,9 @@
       <param name="iou"                  value="$(arg iou)"/>
       <param name="padding_ratio"        value="$(arg padding_ratio)"/>
       <param name="imgsz"                value="$(arg imgsz)"/>
+      <param name="unknown_color_tree_enabled"          value="$(arg unknown_color_tree_enabled)"/>
+      <param name="unknown_color_tree_min_aspect_ratio" value="$(arg unknown_color_tree_min_aspect_ratio)"/>
+      <param name="unknown_color_tree_prob_threshold"   value="$(arg unknown_color_tree_prob_threshold)"/>
       <param name="pub_detections_topic" value="$(arg pub_detections)"/>
       <param name="pub_image_topic"      value="$(arg pub_image)"/>
 
