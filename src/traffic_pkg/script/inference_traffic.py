@@ -177,8 +177,11 @@ class TrafficLightRosNode:
         self.unknown_color_tree_enabled = bool(
             rospy.get_param("~unknown_color_tree_enabled", True)
         )
-        self.unknown_color_tree_min_aspect_ratio = float(
-            rospy.get_param("~unknown_color_tree_min_aspect_ratio", 2.0)
+        self.min_detection_aspect_ratio = float(
+            rospy.get_param(
+                "~min_detection_aspect_ratio",
+                rospy.get_param("~unknown_color_tree_min_aspect_ratio", 2.0),
+            )
         )
         self.unknown_color_tree_prob_threshold = float(
             rospy.get_param("~unknown_color_tree_prob_threshold", DEFAULT_PROB_THRESHOLD)
@@ -271,18 +274,6 @@ class TrafficLightRosNode:
         if normalize_state_key(state_name) != "unknown":
             return state_name, cls_conf
 
-        x1, y1, x2, y2 = bbox
-        width = max(1, x2 - x1)
-        height = max(1, y2 - y1)
-        aspect_ratio = float(width) / float(height)
-        if aspect_ratio < self.unknown_color_tree_min_aspect_ratio:
-            rospy.logdebug(
-                "Dropping unknown traffic light candidate with aspect %.3f < %.3f",
-                aspect_ratio,
-                self.unknown_color_tree_min_aspect_ratio,
-            )
-            return None
-
         if self.unknown_color_tree is None:
             return state_name, cls_conf
 
@@ -325,14 +316,25 @@ class TrafficLightRosNode:
                 continue
 
             det_conf = float(det_conf)
+            bbox = clip_bbox(box.tolist(), img_w, img_h)
+            x1, y1, x2, y2 = bbox
+            aspect_ratio = float(max(1, x2 - x1)) / float(max(1, y2 - y1))
+            if aspect_ratio < self.min_detection_aspect_ratio:
+                rospy.logdebug(
+                    "Dropping traffic light candidate with aspect %.3f < %.3f",
+                    aspect_ratio,
+                    self.min_detection_aspect_ratio,
+                )
+                continue
+
             crop_bbox = pad_bbox(box.tolist(), self.padding_ratio, img_w, img_h)
-            x1, y1, x2, y2 = crop_bbox
-            crop = image_bgr[y1:y2, x1:x2]
+            crop_x1, crop_y1, crop_x2, crop_y2 = crop_bbox
+            crop = image_bgr[crop_y1:crop_y2, crop_x1:crop_x2]
             if crop.size == 0:
                 continue
 
             candidate = {
-                "bbox": clip_bbox(box.tolist(), img_w, img_h),
+                "bbox": bbox,
                 "traffic_type": CAR_TRAFFIC_TYPE,
                 "det_conf": det_conf,
             }
