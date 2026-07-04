@@ -268,6 +268,7 @@ class TrafficLightRosNode:
         self,
         state_name: str,
         cls_conf: float,
+        det_conf: float,
         crop_bgr: np.ndarray,
         bbox: Tuple[int, int, int, int],
     ) -> Optional[Tuple[str, float]]:
@@ -277,7 +278,12 @@ class TrafficLightRosNode:
         if self.unknown_color_tree is None:
             return state_name, cls_conf
 
-        tree_state, tree_conf = self.unknown_color_tree.classify(crop_bgr, bbox)
+        tree_state, tree_conf = self.unknown_color_tree.classify(
+            crop_bgr,
+            bbox,
+            det_conf,
+            cls_conf,
+        )
         if tree_state != "unknown":
             rospy.logdebug(
                 "Unknown classifier result overridden by color tree: %s (%.3f)",
@@ -351,6 +357,7 @@ class TrafficLightRosNode:
             override = self._maybe_override_unknown_state(
                 state_name,
                 float(cls_conf),
+                float(candidate["det_conf"]),
                 crop,
                 candidate["bbox"],
             )
