@@ -2,6 +2,14 @@ src/bevformer_pkg/models/bevformer_latest.trt
 src/bevformer_pkg/models/tcar_latest_old.trt
 src/traffic_pkg/models/best_old.pt
 
+# Unused traffic checkpoints. Runtime defaults use 0608_stage1.pt + 0705_stage2.pt.
+src/traffic_pkg/models/0413_stage1.pt
+src/traffic_pkg/models/0415_stage2_car_yolo.pt
+src/traffic_pkg/models/0415_stage2_ped_yolo.pt
+src/traffic_pkg/models/0608_stage2.pt
+src/traffic_pkg/models/0624_stage2_3.pt
+src/traffic_pkg/models/0704_stage2.pt
+
 # Catkin build outputs
 build/
 devel/

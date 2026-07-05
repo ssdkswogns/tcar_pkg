@@ -10,14 +10,12 @@
 
   <!-- 모델/파라미터 (models/ 아래 파일명만 지정하세요) -->
   <arg name="stage1_weights"     default="0608_stage1.pt" />
-  <arg name="stage2_weights"     default="0624_stage2_3.pt" />
+  <arg name="stage2_weights"     default="0705_stage2.pt" />
   <arg name="det_conf"           default="0.4" />
   <arg name="iou"                default="0.7" />
   <arg name="padding_ratio"      default="0.1" />
   <arg name="imgsz"              default="640" />
   <arg name="min_detection_aspect_ratio"          default="2.0" />
-  <arg name="unknown_color_tree_enabled"          default="true" />
-  <arg name="unknown_color_tree_prob_threshold"   default="0.7" />
 
   <group ns="$(arg ns)">
     <param name="/use_sim_time" value="$(arg use_sim_time)"/>
@@ -39,8 +37,6 @@
       <param name="padding_ratio"        value="$(arg padding_ratio)"/>
       <param name="imgsz"                value="$(arg imgsz)"/>
       <param name="min_detection_aspect_ratio"          value="$(arg min_detection_aspect_ratio)"/>
-      <param name="unknown_color_tree_enabled"          value="$(arg unknown_color_tree_enabled)"/>
-      <param name="unknown_color_tree_prob_threshold"   value="$(arg unknown_color_tree_prob_threshold)"/>
       <param name="pub_detections_topic" value="$(arg pub_detections)"/>
       <param name="pub_image_topic"      value="$(arg pub_image)"/>
 

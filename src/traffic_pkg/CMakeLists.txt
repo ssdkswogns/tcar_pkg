@@ -19,14 +19,18 @@ install(PROGRAMS
 )
 
 install(FILES
-  script/color_decision_tree.py
   script/traffic_light_constants.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 
-# 가중치/체크포인트 등 리소스 동봉 시 (패키지 내부 models/ 디렉토리)
+# 런타임에서 쓰는 모델만 설치
+install(FILES
+  models/0608_stage1.pt
+  models/0705_stage2.pt
+  DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}/models
+)
+
 install(DIRECTORY
-  models
   launch
   DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
   USE_SOURCE_PERMISSIONS
